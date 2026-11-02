@@ -1,0 +1,72 @@
+name: Build patched CC Switch for Apple Silicon
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - single-quota.patch
+      - .github/workflows/build-macos.yml
+permissions:
+  contents: read
+concurrency:
+  group: quota-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Download verified upstream v4.0.22
+        run: |
+          curl --fail --location --retry 3 https://codeload.github.com/farion1231/cc-switch/tar.gz/refs/tags/v4.0.22 -o upstream.tar.gz
+          echo 'ac1da80f90e46579dec0b1542cdac3fff3742003aeeed00a8e70d274272f05bb  upstream.tar.gz' | shasum -a 256 -c -
+          mkdir source
+          tar -xzf upstream.tar.gz -C source --strip-components=1
+          cd source
+          git apply --check ../single-quota.patch
+          git apply ../single-quota.patch
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install pinned pnpm and dependencies
+        working-directory: source
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+      - name: Install project Rust toolchain
+        working-directory: source
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --target aarch64-apple-darwin
+          rustc --version
+      - name: Check types and quota regression tests
+        working-directory: source
+        run: |
+          pnpm typecheck
+          pnpm exec vitest run tests/components/ProviderCard.usageExpansion.test.tsx tests/components/UsageFooter.tokenPlanBalance.test.tsx
+      - name: Build macOS application
+        working-directory: source
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Verify and archive application
+        run: |
+          app='source/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/CC Switch.app'
+          test -d "$app"
+          codesign --verify --deep --strict "$app"
+          file "$app/Contents/MacOS/cc-switch"
+          mkdir artifacts
+          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/CC-Switch-4.0.22-single-quota-macos-arm64.zip
+          cp single-quota.patch artifacts/
+          cd artifacts
+          shasum -a 256 *.zip > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: CC-Switch-4.0.22-single-quota-macos-arm64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
