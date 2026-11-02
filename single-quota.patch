@@ -1,0 +1,157 @@
+--- a/src/components/providers/ProviderCard.tsx
++++ b/src/components/providers/ProviderCard.tsx
+@@ -318,13 +318,23 @@
+ 
+   const isTokenPlan =
+     provider.meta?.usage_script?.templateType === "token_plan";
+-  // 官方订阅的额度窗口不能按普通多套餐展开；缓存残留的旧脚本结果同样不认。
+-  const hasMultiplePlans =
++  // 单个有上限的额度也显示进度条和 extra（如重置时间）；纯余额保持紧凑。
++  // 官方订阅、Token Plan 和禁用查询沿用原有展示。
++  const hasExpandableUsage =
+     scriptUsageActive &&
+     !isTokenPlan &&
+     usage?.success &&
+     usage.data &&
+-    usage.data.length > 1;
++    (usage.data.length > 1 ||
++      usage.data.some(
++        (plan) =>
++          plan.isValid !== false &&
++          typeof plan.total === "number" &&
++          Number.isFinite(plan.total) &&
++          plan.total > 0 &&
++          typeof plan.remaining === "number" &&
++          Number.isFinite(plan.remaining),
++      ));
+ 
+   const [isExpanded, setIsExpanded] = useState(false);
+   const expandLabel = isExpanded
+@@ -332,10 +342,10 @@
+     : t("usage.expand", { defaultValue: "展开" });
+ 
+   useEffect(() => {
+-    if (hasMultiplePlans) {
++    if (hasExpandableUsage) {
+       setIsExpanded(true);
+     }
+-  }, [hasMultiplePlans]);
++  }, [hasExpandableUsage]);
+ 
+   const handleOpenWebsite = () => {
+     if (!isClickableUrl) {
+@@ -591,12 +601,14 @@
+                     />
+                   )
+                 ) : null
+-              ) : hasMultiplePlans ? (
++              ) : hasExpandableUsage ? (
+                 <span className="text-caption text-fg-2">
+-                  {t("usage.multiplePlans", {
+-                    count: usage?.data?.length || 0,
+-                    defaultValue: `${usage?.data?.length || 0} 个套餐`,
+-                  })}
++                  {usage?.data?.length === 1
++                    ? usage.data[0].planName || t("usage.planUsage")
++                    : t("usage.multiplePlans", {
++                        count: usage?.data?.length || 0,
++                        defaultValue: `${usage?.data?.length || 0} 个套餐`,
++                      })}
+                 </span>
+               ) : (
+                 <UsageFooter
+@@ -607,7 +619,7 @@
+                   inline={true}
+                 />
+               )}
+-              {hasMultiplePlans && (
++              {hasExpandableUsage && (
+                 <HoverTip content={expandLabel}>
+                   <button
+                     onClick={(e) => {
+@@ -662,7 +674,7 @@
+         </div>
+       </div>
+ 
+-      {isExpanded && hasMultiplePlans && (
++      {isExpanded && hasExpandableUsage && (
+         <div className="mx-4 mb-3 border-t border-border pt-3">
+           <UsageFooter
+             provider={provider}
+--- a/tests/components/ProviderCard.usageExpansion.test.tsx
++++ b/tests/components/ProviderCard.usageExpansion.test.tsx
+@@ -5,7 +5,7 @@
+ import { ProviderCard } from "@/components/providers/ProviderCard";
+ import type { TemplateType } from "@/config/constants";
+ import { usageKeys } from "@/lib/query/usage";
+-import type { Provider } from "@/types";
++import type { Provider, UsageData } from "@/types";
+ import { createTestQueryClient } from "../utils/testQueryClient";
+ 
+ vi.mock("@/components/providers/ProviderActions", () => ({
+@@ -27,10 +27,12 @@
+   official = false,
+   templateType = "custom",
+   enabled = true,
++  data,
+ }: {
+   official?: boolean;
+   templateType?: TemplateType;
+   enabled?: boolean;
++  data?: UsageData[];
+ } = {}) {
+   const provider: Provider = {
+     id: "cached-usage-provider",
+@@ -47,7 +49,7 @@
+   // A disabled React Query observer still receives existing cache entries.
+   queryClient.setQueryData(usageKeys.script(provider.id, "claude"), {
+     success: true,
+-    data: [
++    data: data ?? [
+       { planName: "five_hour", total: 100, used: 0, remaining: 100, unit: "%" },
+       { planName: "seven_day", total: 100, used: 30, remaining: 70, unit: "%" },
+     ],
+@@ -110,4 +112,43 @@
+     expect(screen.queryByText("expanded-plan-details")).not.toBeInTheDocument();
+     expect(screen.getByRole("button", { name: "展开" })).toBeInTheDocument();
+   });
++  it("expands one capped quota and supports collapse and reopen", async () => {
++    const user = userEvent.setup();
++    renderCard({
++      data: [
++        {
++          planName: "333 · 7 天",
++          total: 800,
++          used: 12.75,
++          remaining: 787.25,
++          unit: "USD",
++          extra: "重置 2026-11-02 20:00",
++        },
++      ],
++    });
++    expect(screen.getByText("333 · 7 天")).toBeInTheDocument();
++    expect(screen.getByText("expanded-plan-details")).toBeInTheDocument();
++    await user.click(screen.getByRole("button", { name: "收起" }));
++    expect(screen.queryByText("expanded-plan-details")).not.toBeInTheDocument();
++    await user.click(screen.getByRole("button", { name: "展开" }));
++    expect(screen.getByText("expanded-plan-details")).toBeInTheDocument();
++  });
++
++  it.each<UsageData>([
++    { remaining: 20, unit: "USD" },
++    { total: -1, remaining: 20 },
++    { total: 0, remaining: 0 },
++    { total: 800, remaining: 0, isValid: false },
++  ])(
++    "keeps balance-only, unlimited and invalid results compact: %j",
++    (plan) => {
++      renderCard({ data: [plan] });
++      expect(
++        screen.queryByText("expanded-plan-details"),
++      ).not.toBeInTheDocument();
++      expect(
++        screen.queryByRole("button", { name: "收起" }),
++      ).not.toBeInTheDocument();
++    },
++  );
+ });
